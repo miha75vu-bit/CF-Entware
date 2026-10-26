@@ -93,9 +93,14 @@ FLASHKEEN_FEEDS = {
 
 LOCAL_INSTALL = r"""logger -t installer '[2/5] Установка основных пакетов из архива...'
 _ipk_dir=/opt/installer-pkgs
+_cf_entware_cleanup_installer_pkgs() {
+    rm -f /tmp/entware-opkg.err 2>/dev/null || true
+    rm -rf "$_ipk_dir" 2>/dev/null || true
+}
 if [ ! -f "$_ipk_dir/order" ]; then
 	logger -t installer 'Critical error: Нет списка локальных пакетов.'
 	logger -t installer 'Выход из установки.'
+    _cf_entware_cleanup_installer_pkgs
 	exit 1
 fi
 while IFS= read -r _ipk || [ -n "$_ipk" ]; do
@@ -104,6 +109,7 @@ while IFS= read -r _ipk || [ -n "$_ipk" ]; do
 	if [ ! -f "$_ipk_dir/$_ipk" ]; then
 		logger -t installer "Critical error: Нет файла пакета \"$_ipk\"."
 		logger -t installer 'Выход из установки.'
+        _cf_entware_cleanup_installer_pkgs
 		exit 1
 	fi
 	logger -t installer "Info: Устанавливается пакет \"$_ipk\"..."
@@ -113,12 +119,12 @@ while IFS= read -r _ipk || [ -n "$_ipk" ]; do
 			logger -t installer "$_line"
 		done < /tmp/entware-opkg.err
 		logger -t installer 'Выход из установки.'
+        _cf_entware_cleanup_installer_pkgs
 		exit 1
 	fi
 	logger -t installer "Info: Пакет \"$_ipk\" установлен."
 done < "$_ipk_dir/order"
-rm -f /tmp/entware-opkg.err
-rm -rf "$_ipk_dir"
+_cf_entware_cleanup_installer_pkgs
 
 """
 
@@ -643,10 +649,23 @@ def download_ipks(arch: str, names: list[str], index: dict[str, dict[str, str]])
         meta = index[name]
         filename = Path(meta["Filename"]).name
         dest = dest_dir / filename
-        url = meta["base_url"].rstrip("/") + "/" + meta["Filename"].lstrip("/")
+        package_path = meta["Filename"].lstrip("/")
+        bases = (meta["base_url"], ARCHES[arch]["feed"], *ARCHES[arch]["mirrors"])
+        urls = list(dict.fromkeys(base.rstrip("/") + "/" + package_path for base in bases))
         if not dest.is_file() or dest.stat().st_size == 0:
             print(f"  пакет {filename}", flush=True)
-        cached_get(url, dest)
+        last_error: RuntimeError | None = None
+        for url in urls:
+            try:
+                cached_get(url, dest)
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                print(f"  источник пакета недоступен, пробую следующий: {url}", flush=True)
+        else:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(f"Нет источников для пакета {filename}")
         return filename, dest
 
     workers = min(8, max(1, len(names)))
