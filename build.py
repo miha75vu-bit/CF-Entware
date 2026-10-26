@@ -127,12 +127,19 @@ AFTER_HOOK = (
 
 
 def http_get(url: str, timeout: float = 60) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    headers = {"User-Agent": UA}
+    if url.startswith("https://api.github.com/"):
+        tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+            headers["Accept"] = "application/vnd.github+json"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}: {url}") from exc
+        detail = exc.read().decode("utf-8", "replace")[:240].replace("\n", " ")
+        raise RuntimeError(f"HTTP {exc.code}: {url}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(f"Сеть: {url}: {exc}") from exc
 
