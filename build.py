@@ -80,6 +80,8 @@ SEED_PACKAGES = [
     "busybox",
     "curl",
     "wget-ssl",
+    "whiptail",
+    "less",
     "ca-certificates",
 ]
 
@@ -343,6 +345,7 @@ SHARED_APP_FEEDS = {
 }
 
 NFQWS_MENU_URL = "https://raw.githubusercontent.com/rndnaame/nfqws-menu/main/nfqws-menu.sh"
+CUSTOM_BANNER_URL = "https://raw.githubusercontent.com/byrekrut/custom-banner-ssh-Keenetic/main/custom-banner.sh"
 
 
 def decode_packages(raw: bytes) -> str:
@@ -775,6 +778,15 @@ def file_bytes(path: Path) -> bytes:
     return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
+def custom_banner_script() -> bytes:
+    raw = cached_get(CUSTOM_BANNER_URL, CACHE / "apps" / "custom-banner.sh", timeout=60)
+    raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    profile_source = b"\n. /opt/etc/profile\n"
+    if raw.count(profile_source) != 1:
+        raise SystemExit("Не найден единственный source /opt/etc/profile в custom-banner.sh")
+    return raw.replace(profile_source, b"\n", 1)
+
+
 def extra_files(
     arch: str,
     variant: str,
@@ -783,6 +795,7 @@ def extra_files(
     app_files: list[tuple[str, bytes, int]],
 ) -> list[tuple[str, bytes, int]]:
     files: list[tuple[str, bytes, int]] = []
+    files.append(("root/custom-banner.sh", custom_banner_script(), 0o755))
     order = "\n".join(name for name, _ in ipks) + "\n"
     files.append(("installer-pkgs/order", order.encode("utf-8"), 0o644))
     for name, path in ipks:
@@ -895,7 +908,13 @@ def build_one(
 
 
 def verify(path: Path, variant: str) -> None:
-    want = {"bin/install", "etc/opkg.conf"}
+    want = {
+        "bin/install",
+        "etc/opkg.conf",
+        "installer-pkgs/order",
+        "root/custom-banner.sh",
+        "usr/local/sbin/entware-login.sh",
+    }
     if variant == "full":
         want |= {
             "Soft/hydraroute-neo/install.sh",
@@ -921,10 +940,14 @@ def verify(path: Path, variant: str) -> None:
     z2k_text = files.get("Soft/z2k/install.sh", b"").decode("utf-8", "replace")
     qbt_text = files.get("Soft/qbittorrent/install.sh", b"").decode("utf-8", "replace")
     usque_text = files.get("Soft/usque/install.sh", b"").decode("utf-8", "replace")
+    banner_text = files["root/custom-banner.sh"].decode("utf-8", "replace")
+    login_text = files["usr/local/sbin/entware-login.sh"].decode("utf-8", "replace")
+    installer_order = files["installer-pkgs/order"].decode("utf-8", "replace").splitlines()
     need = {
         "bin/install",
         "etc/opkg.conf",
         "installer-pkgs/order",
+        "root/custom-banner.sh",
         "usr/local/sbin/entware-after.sh",
         "usr/local/sbin/entware-login.sh",
         "etc/opkg/feedly.conf",
@@ -956,6 +979,13 @@ def verify(path: Path, variant: str) -> None:
         raise SystemExit(f"{path.name}: нет {missing}")
     if "installer-pkgs" not in text:
         raise SystemExit(f"{path.name}: bin/install без локальных пакетов")
+    if ". /opt/etc/profile" in banner_text:
+        raise SystemExit(f"{path.name}: custom-banner.sh рекурсивно загружает profile")
+    if "/opt/root/custom-banner.sh" not in login_text:
+        raise SystemExit(f"{path.name}: banner не запускается при интерактивном входе")
+    for package in ("whiptail", "less"):
+        if not any(Path(name).name.startswith(package + "_") for name in installer_order):
+            raise SystemExit(f"{path.name}: в installer-pkgs/order нет {package}")
     head = text.split("Установка пакетов прошла успешно", 1)[0]
     if "opkg update >/dev/null" in head:
         raise SystemExit(f"{path.name}: в шаге установки остался opkg update")
