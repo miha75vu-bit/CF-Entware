@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import gh_api
+import status
 
 ROOT = Path(__file__).resolve().parent
 DEST = ROOT / ".flashkeen"
@@ -45,7 +46,7 @@ def main() -> None:
     script_asset = assets.get("flashkeen")
     if not script_asset:
         raise SystemExit(f"В релизе {release.get('tag_name')} нет файла flashkeen")
-    print(f"Flashkeen {release.get('tag_name')}", flush=True)
+    status.say(f"Flashkeen {release.get('tag_name')}")
     script = gh_api.download(str(script_asset["browser_download_url"]))
     text = script.replace(b"\r\n", b"\n").replace(b"\r", b"\n").decode("utf-8")
     version = version_of(text)
@@ -59,12 +60,13 @@ def main() -> None:
             raise SystemExit(f"В релизе Flashkeen нет {name}")
         print(f"  {name}", flush=True)
         (DEST / name).write_bytes(gh_api.download(str(asset["browser_download_url"])))
-    print(f"Готово: {DEST}", flush=True)
+    status.say(f"Flashkeen скачан в {DEST}")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except RuntimeError as exc:
-        print(exc, file=sys.stderr)
+    except Exception as exc:
+        status.fail(str(exc))
+        status.dump_exc()
         raise SystemExit(1) from exc

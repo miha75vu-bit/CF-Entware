@@ -7,6 +7,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import gh_api
+import status
 
 MSK = timezone(timedelta(hours=3))
 
@@ -82,6 +83,7 @@ def remove(release: dict) -> bool:
 
 
 def main() -> None:
+    status.say("Проверяю список релизов")
     if not gh_api.token():
         raise SystemExit("Нет GITHUB_TOKEN, старые релизы не удалить")
     releases = list_releases()
@@ -100,6 +102,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except RuntimeError as exc:
-        print(exc, file=sys.stderr)
+    except Exception as exc:
+        status.fail(str(exc))
+        status.dump_exc()
         raise SystemExit(1) from exc

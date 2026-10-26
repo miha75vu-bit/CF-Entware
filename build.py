@@ -10,12 +10,15 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tarfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import status
 
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "cache"
@@ -824,6 +827,11 @@ def gzip_compress(data: bytes) -> bytes:
     return gzip.compress(data, compresslevel=1)
 
 
+def archive_path(arch: str, variant: str) -> Path:
+    label = "full" if variant == "full" else "base"
+    return DIST / f"{arch}-{label}-installer.tar.gz"
+
+
 def build_one(
     arch: str,
     variant: str,
@@ -832,9 +840,8 @@ def build_one(
     feeds: dict[str, bytes],
     app_files: list[tuple[str, bytes, int]],
 ) -> None:
-    out_dir = DIST / ("full_offline_app" if variant == "full" else "base")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{arch}-installer.tar.gz"
+    DIST.mkdir(parents=True, exist_ok=True)
+    out_path = archive_path(arch, variant)
     print(f"  архив {out_path.name}", flush=True)
     extras = extra_files(arch, variant, ipks, feeds, app_files if variant == "full" else [])
     seen_dirs: set[str] = set()
@@ -956,39 +963,70 @@ def verify(path: Path, variant: str) -> None:
 def official_tar(arch: str) -> Path:
     cfg = ARCHES[arch]
     dest = CACHE / "official" / f"{arch}-installer.tar.gz"
-    print(f"  официальный архив {cfg['installer']}")
+    print(f"  официальный архив {cfg['installer']}", flush=True)
     cached_get(cfg["installer"], dest, timeout=120)
     return dest
 
 
 def build_job(job: tuple[str, str]) -> str:
     arch, variant = job
-    print(f"== {arch} {variant} ==", flush=True)
-    index = load_index(arch)
-    names = resolve_closure(index, adapt_seeds(index, SEED_PACKAGES))
-    ipks = download_ipks(arch, names, index)
-    app_files = bundle_soft(arch, index, set(names)) if variant == "full" else []
-    feeds = custom_feed_files(arch)
-    official = official_tar(arch)
-    build_one(arch, variant, official, ipks, feeds, app_files)
-    out = DIST / ("full_offline_app" if variant == "full" else "base") / f"{arch}-installer.tar.gz"
-    return f"  {out} ({out.stat().st_size} байт)"
+    title = f"{arch} {variant}"
+    status.group(title)
+    try:
+        print(f"шаг: индекс Entware {arch}", flush=True)
+        index = load_index(arch)
+        print(f"шаг: пакеты Entware {arch}", flush=True)
+        names = resolve_closure(index, adapt_seeds(index, SEED_PACKAGES))
+        ipks = download_ipks(arch, names, index)
+        if variant == "full":
+            print(f"шаг: программы full {arch}", flush=True)
+            app_files = bundle_soft(arch, index, set(names))
+        else:
+            app_files = []
+        print(f"шаг: фиды {arch}", flush=True)
+        feeds = custom_feed_files(arch)
+        print(f"шаг: официальный установщик {arch}", flush=True)
+        official = official_tar(arch)
+        print(f"шаг: упаковка {title}", flush=True)
+        build_one(arch, variant, official, ipks, feeds, app_files)
+        out = archive_path(arch, variant)
+        line = f"{title}: {out} ({out.stat().st_size} байт)"
+        print(f"готово {line}", flush=True)
+        return line
+    except Exception:
+        status.fail(f"упало на {title}")
+        status.dump_exc()
+        raise
+    finally:
+        status.endgroup()
 
 
 def main() -> None:
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     version = flashkeen_version()
     jobs = [(arch, variant) for arch in ("aarch64", "mipsel", "mips") for variant in ("full", "base")]
     workers = min(len(jobs), os.cpu_count() or 1)
-    ensure_fast_gzip()
-    print(f"Flashkeen {version}", flush=True)
+    gzip_kind = ensure_fast_gzip()
+    status.say(f"Flashkeen {version}, gzip {gzip_kind}, ядер {workers}")
     DIST.mkdir(parents=True, exist_ok=True)
+    for leftover in (DIST / "full_offline_app", DIST / "base"):
+        if leftover.is_dir():
+            shutil.rmtree(leftover)
+    lines: list[str] = []
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        lines = list(pool.map(build_job, jobs))
-    print("Готово:")
+        pending = {pool.submit(build_job, job): job for job in jobs}
+        for future in as_completed(pending):
+            job = pending[future]
+            title = f"{job[0]} {job[1]}"
+            try:
+                lines.append(future.result())
+            except Exception as exc:
+                status.fail(f"архив {title} не собрался: {exc}")
+                raise SystemExit(1) from exc
+    status.say("Все шесть архивов собраны")
     for line in lines:
-        print(line)
+        print(line, flush=True)
     open_dist()
 
 
@@ -1002,4 +1040,10 @@ def open_dist() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        status.dump_exc()
+        raise SystemExit(1)

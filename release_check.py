@@ -16,6 +16,7 @@ from pathlib import Path
 
 import build
 import gh_api
+import status
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / ".release"
@@ -35,16 +36,6 @@ def set_output(name: str, value: str) -> None:
         return
     with open(path, "a", encoding="utf-8", newline="\n") as handle:
         handle.write(f"{name}={value}\n")
-
-
-def step_summary(text: str) -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    with open(path, "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-        if not text.endswith("\n"):
-            handle.write("\n")
 
 
 def fresh_index(bases: list[str]) -> dict[str, dict[str, str]]:
@@ -229,6 +220,7 @@ def notes(old: dict[str, object] | None, new: dict[str, object], lines: list[str
 
 
 def main() -> None:
+    status.say("Сверяю Flashkeen, HydraRoute и Entware")
     current = fingerprint()
     previous = previous_fingerprint()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -238,15 +230,13 @@ def main() -> None:
         newline="\n",
     )
     if previous is not None and canon(previous) == canon(current):
-        print("Без изменений: релиз не нужен", flush=True)
+        status.say("Без изменений: релиз не нужен")
         set_output("publish", "false")
-        step_summary("Изменений Flashkeen, HydraRoute и Entware нет. Релиз не создаётся.")
         return
     lines = [] if previous is None else changed_lines(previous, current)
     if previous is not None and not lines:
-        print("Без изменений: релиз не нужен", flush=True)
+        status.say("Без изменений: релиз не нужен")
         set_output("publish", "false")
-        step_summary("Изменений Flashkeen, HydraRoute и Entware нет. Релиз не создаётся.")
         return
     tag = next_tag()
     (OUT / "notes.md").write_text(notes(previous, current, lines), encoding="utf-8", newline="\n")
@@ -255,17 +245,16 @@ def main() -> None:
         encoding="utf-8",
         newline="\n",
     )
-    print(f"Нужен релиз {tag}", flush=True)
+    status.say(f"Нужен релиз {tag}")
     for line in lines:
-        print(f"  {line}", flush=True)
+        status.say(line)
     set_output("publish", "true")
-    summary = "Первая сборка." if previous is None else "Нужен релиз:\n" + "\n".join(f"- {line}" for line in lines)
-    step_summary(summary)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except RuntimeError as exc:
-        print(exc, file=sys.stderr)
+    except Exception as exc:
+        status.fail(str(exc))
+        status.dump_exc()
         raise SystemExit(1) from exc
