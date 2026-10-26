@@ -17,6 +17,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -29,36 +31,53 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python release_check.py
+        run: |
+          echo "Шаг: сверка Flashkeen, HydraRoute и Entware"
+          python -u release_check.py
 
       - name: Flashkeen из его релиза
         if: steps.check.outputs.publish == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python fetch_flashkeen.py
+        run: |
+          echo "Шаг: скачиваю Flashkeen из его релиза"
+          python -u fetch_flashkeen.py
 
       - name: Сборка архивов
         if: steps.check.outputs.publish == 'true'
         env:
           FLASHKEEN_ROOT: ${{ github.workspace }}/.flashkeen
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python build.py
+        run: |
+          echo "Шаг: собираю шесть архивов"
+          python -u build.py
 
       - name: Публикация релиза
         if: steps.check.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euxo pipefail
+          echo "Шаг: публикую релиз на GitHub"
           tag=$(python -c "import json; print(json.load(open('.release/plan.json', encoding='utf-8'))['tag'])")
           title=$(python -c "import json; print(json.load(open('.release/plan.json', encoding='utf-8'))['title'])")
+          echo "Тег $tag"
+          ls -lh dist .release
           gh release create "$tag" --title "$title" --notes-file .release/notes.md \
-            dist/full_offline_app/*-installer.tar.gz \
-            dist/base/*-installer.tar.gz \
+            dist/aarch64-full-installer.tar.gz \
+            dist/mipsel-full-installer.tar.gz \
+            dist/mips-full-installer.tar.gz \
+            dist/aarch64-base-installer.tar.gz \
+            dist/mipsel-base-installer.tar.gz \
+            dist/mips-base-installer.tar.gz \
             .release/fingerprint.json
+          echo "Релиз $tag опубликован"
 
       - name: Старые релизы
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python release_prune.py
+        run: |
+          echo "Шаг: чищу старые релизы"
+          python -u release_prune.py
