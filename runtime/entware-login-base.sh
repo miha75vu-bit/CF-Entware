@@ -4,6 +4,7 @@ case $- in
     *) return 0 2>/dev/null || exit 0 ;;
 esac
 [ -t 0 ] || return 0 2>/dev/null || exit 0
+[ -r /opt/root/custom-banner.sh ] && . /opt/root/custom-banner.sh
 
 echo
 echo "KeenSnap — резервное копирование для оригинальной прошивки Keenetic / Netcraze"
