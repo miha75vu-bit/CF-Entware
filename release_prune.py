@@ -1,4 +1,4 @@
-"""Оставить в списке релизов один выпуск на месяц, а старше года — один на год."""
+"""Сохранить все релизы текущего месяца и последний релиз каждого прошлого месяца."""
 
 from __future__ import annotations
 
@@ -37,22 +37,17 @@ def keep_ids(releases: list[dict]) -> set[int]:
     if not releases:
         return set()
     ordered = sorted(releases, key=published, reverse=True)
-    edge = datetime.now(MSK) - timedelta(days=365)
-    kept: set[int] = {int(ordered[0]["id"])}
+    current_month = (datetime.now(MSK).year, datetime.now(MSK).month)
+    kept: set[int] = set()
     month_best: dict[tuple[int, int], dict] = {}
-    year_best: dict[int, dict] = {}
     for release in ordered:
         when = published(release)
-        if when >= edge:
-            key = (when.year, when.month)
-            current = month_best.get(key)
-            if current is None or when > published(current):
-                month_best[key] = release
-        else:
-            current = year_best.get(when.year)
-            if current is None or when > published(current):
-                year_best[when.year] = release
-    for release in (*month_best.values(), *year_best.values()):
+        key = (when.year, when.month)
+        if key >= current_month:
+            kept.add(int(release["id"]))
+        elif key not in month_best:
+            month_best[key] = release
+    for release in month_best.values():
         kept.add(int(release["id"]))
     return kept
 
