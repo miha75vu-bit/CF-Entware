@@ -1,0 +1,63 @@
+name: Сборка релиза
+
+on:
+  schedule:
+    # 21:17 по Москве. Релиз создаётся только если изменились исходники.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cf-entware-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Проверка Flashkeen, HydraRoute и Entware
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python release_check.py
+
+      - name: Flashkeen из его релиза
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python fetch_flashkeen.py
+
+      - name: Сборка архивов
+        if: steps.check.outputs.publish == 'true'
+        env:
+          FLASHKEEN_ROOT: ${{ github.workspace }}/.flashkeen
+        run: python build.py
+
+      - name: Публикация релиза
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(python -c "import json; print(json.load(open('.release/plan.json', encoding='utf-8'))['tag'])")
+          title=$(python -c "import json; print(json.load(open('.release/plan.json', encoding='utf-8'))['title'])")
+          gh release create "$tag" --title "$title" --notes-file .release/notes.md \
+            dist/full_offline_app/*-installer.tar.gz \
+            dist/base/*-installer.tar.gz \
+            .release/fingerprint.json
+
+      - name: Старые релизы
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python release_prune.py
