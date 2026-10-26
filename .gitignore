@@ -1,0 +1,6 @@
+cache/
+dist/
+.flashkeen/
+.release/
+__pycache__/
+*.pyc
