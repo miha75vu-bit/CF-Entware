@@ -1,12 +1,14 @@
 """Решать, нужен ли новый релиз CF-Entware.
 
 Релиз создаётся, только если с прошлой сборки изменилось одно из трёх:
-Flashkeen, HydraRoute (hrneo, hrweb, hrdns) или базовый набор Entware,
-который кладётся в архив. Отдельного релиза раз в месяц нет.
+Flashkeen, HydraRoute (hrneo, hrweb, hrdns), базовый набор Entware или
+локальные файлы сборки и программ, которые кладутся в Full. Отдельного релиза
+по расписанию нет: ежедневная проверка только запускает сверку источников.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -52,6 +54,17 @@ def fresh_index(bases: list[str]) -> dict[str, dict[str, str]]:
     raise SystemExit(f"Нет индекса пакетов: {last}")
 
 
+def local_source_fingerprint() -> dict[str, str]:
+    paths = [ROOT / "build.py", ROOT / "Soft-list.txt"]
+    for folder in (ROOT / "apps", ROOT / "runtime", ROOT / ".github"):
+        paths.extend(folder.rglob("*"))
+    return {
+        path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paths)
+        if path.is_file()
+    }
+
+
 def installer_stamp(url: str) -> dict[str, str]:
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": gh_api.UA})
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -93,6 +106,7 @@ def fingerprint() -> dict[str, object]:
         "hydra": hydra,
         "entware_installer": installers,
         "entware_packages": packages,
+        "local_sources": local_source_fingerprint(),
     }
 
 
@@ -163,6 +177,18 @@ def changed_lines(old: dict[str, object], new: dict[str, object]) -> list[str]:
     lines: list[str] = []
     if old.get("flashkeen") != new.get("flashkeen"):
         lines.append(f"Flashkeen: {old.get('flashkeen')} → {new.get('flashkeen')}")
+
+    old_local = old.get("local_sources") if isinstance(old.get("local_sources"), dict) else {}
+    new_local = new.get("local_sources") if isinstance(new.get("local_sources"), dict) else {}
+    changed_local = sorted(
+        path for path in set(old_local) | set(new_local)
+        if old_local.get(path) != new_local.get(path)
+    )
+    if changed_local:
+        shown = ", ".join(changed_local[:6])
+        if len(changed_local) > 6:
+            shown += f" и ещё {len(changed_local) - 6}"
+        lines.append(f"Локальные файлы CF-Entware: {shown}")
 
     old_hydra = old.get("hydra") if isinstance(old.get("hydra"), dict) else {}
     new_hydra = new.get("hydra") if isinstance(new.get("hydra"), dict) else {}
