@@ -815,6 +815,8 @@ def extra_files(
             install = app / "install.sh"
             if install.is_file():
                 files.append((f"Soft/{app.name}/install.sh", file_bytes(install), 0o755))
+            for ipk in sorted(app.glob("*.ipk")):
+                files.append((f"Soft/{app.name}/{ipk.name}", ipk.read_bytes(), 0o644))
         _, dist, qbt = flashkeen_layout()
         files.append(("Soft/qbittorrent/install.sh", patch_qbt_setup(file_bytes(qbt).decode("utf-8")).encode("utf-8"), 0o755))
         files.extend(app_files)
@@ -977,6 +979,17 @@ def verify(path: Path, variant: str) -> None:
     missing = sorted(n for n in need if n not in names)
     if missing:
         raise SystemExit(f"{path.name}: нет {missing}")
+    if variant == "full":
+        for app in APPS.iterdir():
+            if not app.is_dir():
+                continue
+            install = app / "install.sh"
+            if install.is_file() and f"Soft/{app.name}/install.sh" not in names:
+                raise SystemExit(f"{path.name}: не включён установщик Soft/{app.name}/install.sh")
+            for ipk in app.glob("*.ipk"):
+                bundled = f"Soft/{app.name}/{ipk.name}"
+                if bundled not in names:
+                    raise SystemExit(f"{path.name}: не включён пользовательский IPK {bundled}")
     if "installer-pkgs" not in text:
         raise SystemExit(f"{path.name}: bin/install без локальных пакетов")
     if ". /opt/etc/profile" in banner_text:
