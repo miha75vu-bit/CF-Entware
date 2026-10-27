@@ -781,10 +781,22 @@ def file_bytes(path: Path) -> bytes:
 def custom_banner_script() -> bytes:
     raw = cached_get(CUSTOM_BANNER_URL, CACHE / "apps" / "custom-banner.sh", timeout=60)
     raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    profile_source = b"\n. /opt/etc/profile\n"
-    if raw.count(profile_source) != 1:
-        raise SystemExit("Не найден единственный source /opt/etc/profile в custom-banner.sh")
-    return raw.replace(profile_source, b"\n", 1)
+    replacements = (
+        (b'TEMP="N/A"', b'TEMP=""'),
+        (
+            b'PROCS="$(ls /proc | grep -E \'^[0-9]+$\' | wc -l)"',
+            b'PROCS=0\nfor _pid in /proc/[0-9]*; do\n    [ -d "$_pid" ] && PROCS=$((PROCS + 1))\ndone',
+        ),
+        (
+            b'printf "%b %-12s%b %b%s%b\\n" "$ROW_COLOR" "CPU Temp:" "$reset" "$TEMP_COLOR" "$TEMP" "$reset"',
+            b'[ -z "$TEMP" ] || printf "%b %-12s%b %b%s%b\\n" "$ROW_COLOR" "CPU Temp:" "$reset" "$TEMP_COLOR" "$TEMP" "$reset"',
+        ),
+    )
+    for original, replacement in replacements:
+        if raw.count(original) != 1:
+            raise SystemExit("Не удалось безопасно адаптировать вывод custom-banner.sh")
+        raw = raw.replace(original, replacement, 1)
+    return raw
 
 
 def extra_files(
@@ -796,10 +808,16 @@ def extra_files(
 ) -> list[tuple[str, bytes, int]]:
     files: list[tuple[str, bytes, int]] = []
     files.append(("root/custom-banner.sh", custom_banner_script(), 0o755))
-    order = "\n".join(name for name, _ in ipks) + "\n"
-    files.append(("installer-pkgs/order", order.encode("utf-8"), 0o644))
+    _, dist, qbt = flashkeen_layout()
+    flashkeen_ipk = dist / f"flashkeen_{flashkeen_version()}_{ARCHES[arch]['ipk_arch']}.ipk"
+    if not flashkeen_ipk.is_file():
+        raise SystemExit(f"Нет IPK Flashkeen: {flashkeen_ipk}")
+    order = [name for name, _ in ipks]
+    order.append(flashkeen_ipk.name)
+    files.append(("installer-pkgs/order", ("\n".join(order) + "\n").encode("utf-8"), 0o644))
     for name, path in ipks:
         files.append((f"installer-pkgs/{name}", path.read_bytes(), 0o644))
+    files.append((f"installer-pkgs/{flashkeen_ipk.name}", flashkeen_ipk.read_bytes(), 0o644))
     for fname, body in feeds.items():
         files.append((f"etc/opkg/{fname}", body if body.endswith(b"\n") else body + b"\n", 0o644))
 
@@ -817,21 +835,11 @@ def extra_files(
                 files.append((f"Soft/{app.name}/install.sh", file_bytes(install), 0o755))
             for ipk in sorted(app.glob("*.ipk")):
                 files.append((f"Soft/{app.name}/{ipk.name}", ipk.read_bytes(), 0o644))
-        _, dist, qbt = flashkeen_layout()
         files.append(("Soft/qbittorrent/install.sh", patch_qbt_setup(file_bytes(qbt).decode("utf-8")).encode("utf-8"), 0o755))
         files.extend(app_files)
-        ipk = dist / f"flashkeen_{flashkeen_version()}_{ARCHES[arch]['ipk_arch']}.ipk"
-        if not ipk.is_file():
-            raise SystemExit(f"Нет IPK Flashkeen: {ipk}")
-        files.append((f"Soft/flashkeen/{ipk.name}", ipk.read_bytes(), 0o644))
     else:
         files.append(("usr/local/sbin/entware-after.sh", file_bytes(RUNTIME / "entware-after-base.sh"), 0o755))
         files.append(("usr/local/sbin/entware-login.sh", file_bytes(RUNTIME / "entware-login-base.sh"), 0o755))
-        _, dist, _ = flashkeen_layout()
-        ipk = dist / f"flashkeen_{flashkeen_version()}_{ARCHES[arch]['ipk_arch']}.ipk"
-        if not ipk.is_file():
-            raise SystemExit(f"Нет IPK Flashkeen: {ipk}")
-        files.append((f"usr/local/flashkeen/{ipk.name}", ipk.read_bytes(), 0o644))
     return files
 
 
@@ -957,6 +965,7 @@ def verify(path: Path, variant: str) -> None:
     }
     if variant == "full":
         need |= {
+            "usr/local/sbin/entware-after.sh",
             "Soft/menu.sh",
             "Soft/install-local.sh",
             "Soft/Soft list.txt",
@@ -992,10 +1001,15 @@ def verify(path: Path, variant: str) -> None:
                     raise SystemExit(f"{path.name}: не включён пользовательский IPK {bundled}")
     if "installer-pkgs" not in text:
         raise SystemExit(f"{path.name}: bin/install без локальных пакетов")
-    if ". /opt/etc/profile" in banner_text:
-        raise SystemExit(f"{path.name}: custom-banner.sh рекурсивно загружает profile")
+    flashkeen_ipk = next((name for name in installer_order if name.startswith("flashkeen_") and name.endswith(".ipk")), "")
+    if not flashkeen_ipk or f"installer-pkgs/{flashkeen_ipk}" not in names:
+        raise SystemExit(f"{path.name}: Flashkeen IPK не установлен общим шагом")
+    if ". /opt/etc/profile" not in banner_text:
+        raise SystemExit(f"{path.name}: custom-banner.sh изменён или не загружает profile")
+    if 'TEMP="N/A"' in banner_text or 'ls /proc | grep' in banner_text:
+        raise SystemExit(f"{path.name}: в баннере остался некорректный вывод температуры или процессов")
     if "/opt/root/custom-banner.sh" not in login_text:
-        raise SystemExit(f"{path.name}: banner не запускается при интерактивном входе")
+        raise SystemExit(f"{path.name}: login-hook не запускает баннер")
     for package in ("whiptail", "less"):
         if not any(Path(name).name.startswith(package + "_") for name in installer_order):
             raise SystemExit(f"{path.name}: в installer-pkgs/order нет {package}")
@@ -1017,6 +1031,8 @@ def verify(path: Path, variant: str) -> None:
             raise SystemExit(f"{path.name}: нет пакета hrneo")
         if not any(n.startswith("Soft/awg-manager/awg-manager_") and n.endswith(".ipk") for n in names):
             raise SystemExit(f"{path.name}: нет пакета awg-manager")
+        if any(n.startswith("Soft/flashkeen/") and n.endswith(".ipk") for n in names):
+            raise SystemExit(f"{path.name}: Flashkeen дублируется в Soft")
         if any(n.startswith("Soft/usque/") and n.endswith(".ipk") for n in names):
             raise SystemExit(f"{path.name}: Usque попал в архив")
     print(f"  проверен {path.name}", flush=True)
