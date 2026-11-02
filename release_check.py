@@ -1,14 +1,11 @@
 """Решать, нужен ли новый релиз CF-Entware.
 
-Релиз создаётся, только если с прошлой сборки изменилось одно из трёх:
-Flashkeen, HydraRoute (hrneo, hrweb, hrdns), базовый набор Entware или
-локальные файлы сборки и программ, которые кладутся в Full. Отдельного релиза
-по расписанию нет: ежедневная проверка только запускает сверку источников.
+Релиз создаётся только при изменениях в Flashkeen, HydraRoute или Entware.
+Ежедневная проверка сверяет только эти три источника.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -22,7 +19,6 @@ import status
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / ".release"
-MARKER = "<!-- cf-sources"
 MSK = timezone(timedelta(hours=3))
 HYDRA_NAMES = ("hrneo", "hrweb", "hrdns")
 
@@ -52,17 +48,6 @@ def fresh_index(bases: list[str]) -> dict[str, dict[str, str]]:
             except (RuntimeError, OSError) as exc:
                 last = exc
     raise SystemExit(f"Нет индекса пакетов: {last}")
-
-
-def local_source_fingerprint() -> dict[str, str]:
-    paths = [ROOT / "build.py", ROOT / "Soft-list.txt"]
-    for folder in (ROOT / "apps", ROOT / "runtime", ROOT / ".github"):
-        paths.extend(folder.rglob("*"))
-    return {
-        path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(paths)
-        if path.is_file()
-    }
 
 
 def installer_stamp(url: str) -> dict[str, str]:
@@ -106,26 +91,10 @@ def fingerprint() -> dict[str, object]:
         "hydra": hydra,
         "entware_installer": installers,
         "entware_packages": packages,
-        "local_sources": local_source_fingerprint(),
     }
 
 
-def parse_marker(body: str) -> dict[str, object] | None:
-    start = body.find(MARKER)
-    if start < 0:
-        return None
-    start = body.find("\n", start)
-    end = body.find("\n-->", start)
-    if start < 0 or end < 0:
-        return None
-    try:
-        data = json.loads(body[start:end])
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def previous_fingerprint() -> dict[str, object] | None:
+def latest_release() -> dict[str, object] | None:
     url = f"https://api.github.com/repos/{gh_api.repo()}/releases/latest"
     try:
         release = gh_api.get_json(url)
@@ -133,16 +102,37 @@ def previous_fingerprint() -> dict[str, object] | None:
         if "HTTP 404" in str(exc):
             return None
         raise
-    if not isinstance(release, dict):
+    return release if isinstance(release, dict) else None
+
+
+def previous_fingerprint(release: dict[str, object] | None) -> dict[str, object] | None:
+    if release is None:
         return None
     for asset in release.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
         if asset.get("name") != "fingerprint.json":
             continue
         raw = gh_api.download(str(asset["browser_download_url"]))
         data = json.loads(raw.decode("utf-8"))
         if isinstance(data, dict):
             return data
-    return parse_marker(str(release.get("body") or ""))
+    return None
+
+
+def published_today(release: dict[str, object] | None) -> bool:
+    if release is None:
+        return False
+    published_at = release.get("published_at")
+    if not isinstance(published_at, str):
+        return False
+    try:
+        published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    return published.astimezone(MSK).date() == datetime.now(MSK).date()
 
 
 def existing_tags() -> set[str]:
@@ -176,79 +166,30 @@ def next_tag() -> str:
 def changed_lines(old: dict[str, object], new: dict[str, object]) -> list[str]:
     lines: list[str] = []
     if old.get("flashkeen") != new.get("flashkeen"):
-        lines.append(f"Flashkeen: {old.get('flashkeen')} → {new.get('flashkeen')}")
-
-    old_local = old.get("local_sources") if isinstance(old.get("local_sources"), dict) else {}
-    new_local = new.get("local_sources") if isinstance(new.get("local_sources"), dict) else {}
-    changed_local = sorted(
-        path for path in set(old_local) | set(new_local)
-        if old_local.get(path) != new_local.get(path)
-    )
-    if changed_local:
-        shown = ", ".join(changed_local[:6])
-        if len(changed_local) > 6:
-            shown += f" и ещё {len(changed_local) - 6}"
-        lines.append(f"Локальные файлы CF-Entware: {shown}")
-
-    old_hydra = old.get("hydra") if isinstance(old.get("hydra"), dict) else {}
-    new_hydra = new.get("hydra") if isinstance(new.get("hydra"), dict) else {}
-    for arch in ("aarch64", "mipsel", "mips"):
-        before = old_hydra.get(arch) if isinstance(old_hydra, dict) else None
-        after = new_hydra.get(arch) if isinstance(new_hydra, dict) else None
-        before = before if isinstance(before, dict) else {}
-        after = after if isinstance(after, dict) else {}
-        bits = [
-            f"{name} {before.get(name)} → {after.get(name)}"
-            for name in HYDRA_NAMES
-            if before.get(name) != after.get(name)
-        ]
-        if bits:
-            lines.append(f"HydraRoute {arch}: " + ", ".join(bits))
-
-    old_inst = old.get("entware_installer") if isinstance(old.get("entware_installer"), dict) else {}
-    new_inst = new.get("entware_installer") if isinstance(new.get("entware_installer"), dict) else {}
-    old_pkgs = old.get("entware_packages") if isinstance(old.get("entware_packages"), dict) else {}
-    new_pkgs = new.get("entware_packages") if isinstance(new.get("entware_packages"), dict) else {}
-    for arch in ("aarch64", "mipsel", "mips"):
-        if old_inst.get(arch) != new_inst.get(arch):
-            lines.append(f"Entware {arch}: обновился официальный установщик")
-        before = old_pkgs.get(arch) if isinstance(old_pkgs, dict) else None
-        after = new_pkgs.get(arch) if isinstance(new_pkgs, dict) else None
-        before = before if isinstance(before, dict) else {}
-        after = after if isinstance(after, dict) else {}
-        names = sorted(set(before) | set(after))
-        changed = [name for name in names if before.get(name) != after.get(name)]
-        if not changed:
-            continue
-        shown = ", ".join(f"{name} {before.get(name, 'нет')} → {after.get(name, 'нет')}" for name in changed[:6])
-        if len(changed) > 6:
-            shown += f" и ещё {len(changed) - 6}"
-        lines.append(f"Entware {arch}: {shown}")
+        lines.append("Flashkeen")
+    if old.get("hydra") != new.get("hydra"):
+        lines.append("HydraRoute")
+    if (
+        old.get("entware_installer") != new.get("entware_installer")
+        or old.get("entware_packages") != new.get("entware_packages")
+    ):
+        lines.append("Entware")
     return lines
 
 
 def notes(old: dict[str, object] | None, new: dict[str, object], lines: list[str]) -> str:
     if old is None:
-        hydra = new.get("hydra")
-        aarch64 = hydra.get("aarch64") if isinstance(hydra, dict) else None
-        aarch64 = aarch64 if isinstance(aarch64, dict) else {}
-        parts = [f"{name} {aarch64.get(name)}" for name in HYDRA_NAMES]
-        text = [
-            "Первая сборка.",
-            "",
-            f"Flashkeen: {new.get('flashkeen')}",
-            "HydraRoute: " + ", ".join(parts),
-        ]
+        text = ["Первая сборка.", "", "Источники: Entware, Flashkeen, HydraRoute."]
     else:
-        text = ["Обновилось:", "", *[f"- {line}" for line in lines]]
-    text.extend(["", MARKER, json.dumps(new, ensure_ascii=False, sort_keys=True, indent=2), "-->", ""])
-    return "\n".join(text)
+        text = ["Изменилось: " + ", ".join(lines) + "."]
+    return "\n".join([*text, ""])
 
 
 def main() -> None:
     status.say("Сверяю Flashkeen, HydraRoute и Entware")
     current = fingerprint()
-    previous = previous_fingerprint()
+    latest = latest_release()
+    previous = previous_fingerprint(latest)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "fingerprint.json").write_text(
         json.dumps(current, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -262,6 +203,10 @@ def main() -> None:
     lines = [] if previous is None else changed_lines(previous, current)
     if previous is not None and not lines:
         status.say("Без изменений: релиз не нужен")
+        set_output("publish", "false")
+        return
+    if published_today(latest):
+        status.say("Релиз уже публиковался сегодня по Москве: лимит 1 релиз в сутки")
         set_output("publish", "false")
         return
     tag = next_tag()

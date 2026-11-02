@@ -60,7 +60,7 @@ ARCHES = {
     },
 }
 
-# Список официального bin/install плюс curl, wget-ssl, ca-certificates.
+# Список официального bin/install без dropbear: встроенный SSH Keenetic занимает порт 22.
 SEED_PACKAGES = [
     "libgcc",
     "libc",
@@ -75,7 +75,6 @@ SEED_PACKAGES = [
     "zoneinfo-asia",
     "zoneinfo-europe",
     "opt-ndmsv2",
-    "dropbear",
     "poorbox",
     "busybox",
     "curl",
@@ -1004,6 +1003,8 @@ def verify(path: Path, variant: str) -> None:
     flashkeen_ipk = next((name for name in installer_order if name.startswith("flashkeen_") and name.endswith(".ipk")), "")
     if not flashkeen_ipk or f"installer-pkgs/{flashkeen_ipk}" not in names:
         raise SystemExit(f"{path.name}: Flashkeen IPK не установлен общим шагом")
+    if any(Path(name).name.startswith("dropbear_") for name in installer_order):
+        raise SystemExit(f"{path.name}: dropbear конфликтует со встроенным SSH Keenetic на порту 22")
     if ". /opt/etc/profile" not in banner_text:
         raise SystemExit(f"{path.name}: custom-banner.sh изменён или не загружает profile")
     if 'TEMP="N/A"' in banner_text or 'ls /proc | grep' in banner_text:
